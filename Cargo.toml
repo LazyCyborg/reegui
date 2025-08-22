@@ -1,7 +1,7 @@
 [package]
-name = "eframe_template"
+name = "reegui"
 version = "0.1.0"
-authors = ["Emil Ernerfeldt <emil.ernerfeldt@gmail.com>"]
+authors = ["Alex <hjarneko@gmail.com>"]
 edition = "2024"
 include = ["LICENSE-APACHE", "LICENSE-MIT", "**/*.rs", "Cargo.toml"]
 rust-version = "1.85"
@@ -24,6 +24,9 @@ log = "0.4.27"
 
 # You only need serde if you want app persistence:
 serde = { version = "1.0.219", features = ["derive"] }
+ndarray = "0.16.1"
+clap = { version = "4.5.41", features = ["derive"] }
+egui_plot = "0.33.0"
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

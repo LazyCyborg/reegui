@@ -1,72 +1,207 @@
-#![warn(clippy::all, rust_2018_idioms)]
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
-// When compiling natively:
-#[cfg(not(target_arch = "wasm32"))]
-fn main() -> eframe::Result {
-    env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
+use std::fs;
+use clap::Parser;
+use ndarray::prelude::*;
+//use plotly::{Plot, Scatter};
+use eframe::NativeOptions;
 
-    let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([400.0, 300.0])
-            .with_min_inner_size([300.0, 220.0])
-            .with_icon(
-                // NOTE: Adding an icon is optional
-                eframe::icon_data::from_png_bytes(&include_bytes!("../assets/icon-256.png")[..])
-                    .expect("Failed to load icon"),
-            ),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "eframe template",
-        native_options,
-        Box::new(|cc| Ok(Box::new(eframe_template::TemplateApp::new(cc)))),
-    )
+
+// My stuff
+mod io;
+mod gui;
+mod app;
+
+use reegui::EEGInfo;
+use reegui::EEGData;
+
+//use std::any::type_name;
+//fn type_of<T>(_: T) -> &'static str {
+  //  type_name::<T>()
+//}
+
+// CLI code
+// underscores will be converted to "-" when clap parses the arguments
+#[derive(Parser)]
+#[command(name = "reeg")]
+#[command(version = "0.1.0")]
+#[command(about = "Does awesome EEG things", long_about = None)]
+pub struct Cli {
+    
+    /// File path of the .vhdr if BV (str)
+    #[arg(long, required_if_eq("format", "brainvision"))]
+    hfpath: Option<String>,
+
+    /// File path of the .eeg if BV or .edf if EDF (str)
+    #[arg(long)]
+    dfpath: String,
+
+    /// Read and display the data as a table
+    #[arg(short, long)]
+    read_data: bool,
+
+    /// Select data format (Brainvision or EDF)
+    #[arg(short, long)]
+    format: String,
+
+    /// View data in reader (bool)
+    #[arg(short, long)]
+    view: bool,
 }
 
-// When compiling to web using trunk:
-#[cfg(target_arch = "wasm32")]
-fn main() {
-    use eframe::wasm_bindgen::JsCast as _;
+ 
 
-    // Redirect `log` message to `console.log` and friends:
-    eframe::WebLogger::init(log::LevelFilter::Debug).ok();
+fn check(data: &Array2<f32>, eeg_info: &EEGInfo) {
+    let view = data.view();
+    println!("VIEW {:?}", view);
+    println!("DATA {:?}", data.dim());
+    println!("ROW 1 {:?}", data.row(1).shape());
+    for c in data.outer_iter() {
+        println!("C {:?} {:?}", c.first(), c.last())
+    }
+}
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
 
-    let web_options = eframe::WebOptions::default();
+    match cli.read_data {
+        true => {
+            println!("Reading from fpath {:?}", cli.hfpath);
+            let header = io::get_header(&cli.hfpath)?;
+            //println!("Header: {:?}", header);
+            let eeg_info = io::parse_header(&header)?;
+            println!("Reading from fpath {:?}", cli.dfpath);
+            let samples = io::parse_bytes(&cli.dfpath, &eeg_info)?;
+            let times = io::convert_to_seconds(samples, &eeg_info)?;
+            println!("TIMES: {:?}", times.len());
+            let channels = io::demultiplex(times, &eeg_info);
+            println!("DATA READ");
+            //println!("CHANNELS {:?}", &channels.unwrap().len());
+            let data = io::vec_to_ndarray(channels.unwrap());
+            println!("SHAPE OF DATA {:?}", data.shape());
+            println!("Row {:?}", &data.row(0).len());
+            println!("Column {:?}", &data.column(0).len());
 
-    wasm_bindgen_futures::spawn_local(async {
-        let document = web_sys::window()
-            .expect("No window")
-            .document()
-            .expect("No document");
-
-        let canvas = document
-            .get_element_by_id("the_canvas_id")
-            .expect("Failed to find the_canvas_id")
-            .dyn_into::<web_sys::HtmlCanvasElement>()
-            .expect("the_canvas_id was not a HtmlCanvasElement");
-
-        let start_result = eframe::WebRunner::new()
-            .start(
-                canvas,
-                web_options,
-                Box::new(|cc| Ok(Box::new(eframe_template::TemplateApp::new(cc)))),
-            )
-            .await;
-
-        // Remove the loading text and spinner:
-        if let Some(loading_text) = document.get_element_by_id("loading_text") {
-            match start_result {
-                Ok(_) => {
-                    loading_text.remove();
-                }
-                Err(e) => {
-                    loading_text.set_inner_html(
-                        "<p> The app has crashed. See the developer console for details. </p>",
-                    );
-                    panic!("Failed to start eframe: {e:?}");
-                }
-            }
         }
-    });
+
+        _ => {}
+    };
+
+   let _ = match cli.view {
+        true => {
+            
+            match cli.format.as_str() {
+            
+            "brainvision" => {
+                    
+                println!("Reading from fpath {:?}", cli.hfpath);
+                let header = io::get_header(&cli.hfpath)?;
+                //println!("Header: {:?}", header);
+                let eeg_info = io::parse_header(&header)?;
+                println!("Reading from fpath {:?}", cli.dfpath);
+                let samples = io::parse_bytes(&cli.dfpath, &eeg_info)?;
+    
+                let metadata = fs::metadata(&cli.dfpath)?;
+                let file_size_bytes = metadata.len();
+                let expected_size_from_samples = samples.len() * 2; // 2 bytes per i16 sample
+                
+                println!("[Verification] EEG file size on disk: {} bytes", file_size_bytes);
+                println!("[Verification] Size calculated from parsed samples: {} bytes", expected_size_from_samples);
+                if file_size_bytes == expected_size_from_samples as u64 {
+                    println!("Total sample count matches file size.");
+                } else {
+                    println!("ERROR: Mismatch between file size and parsed samples!");
+                }
+                let times = io::convert_to_seconds(samples, &eeg_info)?;
+                println!("TIMES: {:?} seconds", times.len());
+                let channels = io::demultiplex(times, &eeg_info);
+                println!("DATA READ");
+                //println!("CHANNELS {:?}", &channels.unwrap().len());
+                let data = io::vec_to_ndarray(channels.unwrap());
+                println!("SHAPE OF DATA {:?}", data.shape());
+                let eeg_data = EEGData { data };
+    
+                let native_options = eframe::NativeOptions {
+                    viewport: egui::ViewportBuilder::default()
+                        .with_inner_size([400.0, 300.0])
+                        .with_min_inner_size([300.0, 220.0])
+                        .with_icon(
+                            // NOTE: Adding an icon is optional
+                            eframe::icon_data::from_png_bytes(&include_bytes!("../assets/icon-256.png")[..])
+                                .expect("Failed to load icon"),
+                        ),
+                    ..Default::default()
+                };
+    
+                eframe::run_native(
+                    "reegui",
+                    native_options,
+                    Box::new(|cc| Ok(Box::new(reegui::TemplateApp::new(cc, eeg_info, eeg_data)))),
+                )
+                    
+                }
+                
+            "edf" => {
+                    
+                println!("Reading from fpath {:?}", cli.dfpath);
+                let edf = io::parse_edf(&cli.dfpath.as_str())?;
+                //println!("Header: {:?}", header);
+                /*
+                let eeg_info = io::parse_header(&header)?;
+                println!("Reading from fpath {:?}", cli.dfpath);
+                let samples = io::parse_bytes(&cli.dfpath, &eeg_info)?;
+    
+                let metadata = fs::metadata(&cli.dfpath)?;
+                let file_size_bytes = metadata.len();
+                let expected_size_from_samples = samples.len() * 2; // 2 bytes per i16 sample
+    
+                println!("[Verification] EEG file size on disk: {} bytes", file_size_bytes);
+                println!("[Verification] Size calculated from parsed samples: {} bytes", expected_size_from_samples);
+    
+                if file_size_bytes == expected_size_from_samples as u64 {
+                    println!("Total sample count matches file size.");
+                } else {
+                    println!("ERROR: Mismatch between file size and parsed samples!");
+                }
+                let times = io::convert_to_seconds(samples, &eeg_info)?;
+                println!("TIMES: {:?} seconds", times.len());
+                let channels = io::demultiplex(times, &eeg_info);
+                println!("DATA READ");
+                //println!("CHANNELS {:?}", &channels.unwrap().len());
+                let data = io::vec_to_ndarray(channels.unwrap());
+                println!("SHAPE OF DATA {:?}", data.shape());
+                let eeg_data = EEGData { data };
+    
+                let native_options = eframe::NativeOptions {
+                    viewport: egui::ViewportBuilder::default()
+                        .with_inner_size([400.0, 300.0])
+                        .with_min_inner_size([300.0, 220.0])
+                        .with_icon(
+                            // NOTE: Adding an icon is optional
+                            eframe::icon_data::from_png_bytes(&include_bytes!("../assets/icon-256.png")[..])
+                                .expect("Failed to load icon"),
+                        ),
+                    ..Default::default()
+                };
+    
+                eframe::run_native(
+                    "reegui",
+                    native_options,
+                    Box::new(|cc| Ok(Box::new(reegui::TemplateApp::new(cc, eeg_info, eeg_data)))),
+                )
+                */
+                Ok({})
+                    
+                }
+            _ => {
+                    println!("Error: Unknown format specified: {}", cli.format);
+                    Ok(())
+                }
+             }
+
+        }
+        _ => Ok({})
+
+    };
+
+    Ok(())
 }
+

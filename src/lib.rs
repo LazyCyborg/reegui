@@ -1,9 +1,10 @@
 #![warn(clippy::all, rust_2018_idioms)]
-use ndarray::Array2;
+use ndarray::{Array2, Array3};
 
 pub mod app; 
 pub mod io; 
 pub mod signal;
+pub mod epochs;
 pub use app::TemplateApp;
 
 #[derive(Debug)] 
@@ -19,7 +20,18 @@ pub struct EEGInfo {
 }
 
 #[derive(Debug)] 
+pub struct Markers {
+    pub n_markers: usize,
+    pub markers: Vec<f64>
+}
+
+#[derive(Debug)] 
 pub struct EEGData {
     pub data: Array2<i16>,
+}
+
+#[derive(Debug)] 
+pub struct EpochsData {
+    pub epochs: Array3<i16>
 }
 

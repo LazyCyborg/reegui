@@ -27,6 +27,13 @@ serde = { version = "1.0.219", features = ["derive"] }
 ndarray = "0.16.1"
 clap = { version = "4.5.41", features = ["derive"] }
 egui_plot = "0.33.0"
+rayon = "1.11.0"
+sci-rs = "0.4.1"
+num-traits = "0.2.19"
+ndarray-linalg = "0.17.0"
+cubic_spline = "1.0.0"
+nalgebra = "0.33.2"
+rustfft = "6.4.0"
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

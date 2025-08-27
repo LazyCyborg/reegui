@@ -1,15 +1,12 @@
 use std::fs;
-use std::io;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
 
-use egui::AtomExt;
-use egui::IntoAtoms;
-//use byteorder::{BigEndian, LittleEndian, ReadBytesExt, WriteBytesExt};
 use ndarray::prelude::*;
 
 use crate::EEGInfo;
+use crate::Markers;
 
 //fn type_of<T>(_: T) -> &'static str {
 //    type_name::<T>()
@@ -111,13 +108,13 @@ pub fn parse_header(header: &Option<String>) -> Result<EEGInfo, Box<dyn std::err
 
     for x in header_vec.iter() {
          
-        if x.contains("Ch") {
-            println!("CHANNEL: {:?}", x);
+        if x.contains("µV") {
+            //println!("{:?}", x);
             eeg_info
                 .ch_names
-                .push(x.to_string().replace("µV\r", "").replace("Ch", ""));
+                .push(x.to_string().replace(",,0.1,µV", "").replace("Ch", ""));
         }
-        if eeg_info.ch_names.len() == eeg_info.num_ch as usize + 3 {
+        if eeg_info.ch_names.len() == eeg_info.num_ch as usize{
             break;
         }
         };
@@ -125,6 +122,47 @@ pub fn parse_header(header: &Option<String>) -> Result<EEGInfo, Box<dyn std::err
     //println!("Header: {:?}", header_str);
     //println!("{:?}", eeg_info);
     Ok(eeg_info)
+}
+
+pub fn get_vmrk(fpath: &Option<String>) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    match  fpath {
+        Some(path) => {
+        let mut file = File::open(path)?;
+        let mut vmrk = String::new();
+        file.read_to_string(&mut vmrk)?;
+        Ok(Some(vmrk))
+        }
+
+    None => Ok(None),
+    }
+
+}
+
+
+pub fn parse_vmrk(vmrk: &Option<String>) -> Result<Markers, Box<dyn std::error::Error>> {
+
+    let vmrk_content = match vmrk {
+        Some(content) => content,
+        None => return Err(".VMRK content is missing and required for this operation.".into()),
+    };
+    let vmrk_vec: Vec<String> = vmrk_content.split("\n").map(|x| x.to_string()).collect();
+    let mut markers = Markers {
+        n_markers: 0,
+        markers: Vec::new()
+    };
+    let mut marker_vec: Vec<f64> = Vec::new();
+    vmrk_vec.iter().for_each(|x| {
+        if x.contains("R128") {
+        let chars: Vec<&str> = x.split(",").collect();
+        //println!("CHARS: {:?}", chars[2]);
+        let default: f64 = 0.0;
+        marker_vec.push(chars[2].parse::<f64>().unwrap_or(default));
+        }
+});
+    //println!("MARKERS {:?}", marker_vec);
+    markers.markers = marker_vec.clone();
+    markers.n_markers = marker_vec.len();
+    Ok(markers)
 }
 
 

@@ -107,7 +107,7 @@ pub fn parse_header(header: &Option<String>) -> Result<EEGInfo, Box<dyn std::err
     });
 
     for x in header_vec.iter() {
-         
+
         if x.contains("µV") {
             //println!("{:?}", x);
             eeg_info
@@ -163,6 +163,46 @@ pub fn parse_vmrk(vmrk: &Option<String>) -> Result<Markers, Box<dyn std::error::
     markers.markers = marker_vec.clone();
     markers.n_markers = marker_vec.len();
     Ok(markers)
+}
+
+
+pub fn parse_bytes_opt(path: &str, eeg_info: &EEGInfo) -> Result<Vec<Vec<i16>>, Box<dyn std::error::Error>> {
+    match eeg_info.binary_format.as_str() {
+        "INT_16" => {
+            let file = File::open(path)?;
+            let metadata = file.metadata()?;
+            let file_size = metadata.len() as usize;
+
+            // Pre-calculate sizes
+            let total_samples = file_size / 2; // 2 bytes per i16
+            let samples_per_channel = total_samples / eeg_info.num_ch as usize;
+
+            // Pre-allocate all channel vectors
+            let mut channels: Vec<Vec<i16>> = vec![Vec::with_capacity(samples_per_channel); eeg_info.num_ch as usize];
+
+            let mut reader = BufReader::new(file);
+            let mut buffer = vec![0u8; 8192]; // 4KB chunks
+            let mut byte_pair = [0u8; 2];
+            let mut channel_idx = 0;
+
+            loop {
+                let bytes_read = reader.read(&mut buffer)?;
+                if bytes_read == 0 { break; }
+
+                // Process in pairs of bytes
+                for chunk in buffer[..bytes_read].chunks_exact(2) {
+                    byte_pair.copy_from_slice(chunk);
+                    let sample = i16::from_le_bytes(byte_pair);
+
+                    channels[channel_idx].push(sample);
+                    channel_idx = (channel_idx + 1) % eeg_info.num_ch as usize;
+                }
+            }
+
+            Ok(channels)
+        }
+        _ => Err("Format not supported".into()),
+    }
 }
 
 

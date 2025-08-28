@@ -1,4 +1,6 @@
 use std::iter::Sum;
+use rayon::prelude::*;
+use std::sync::Arc;
 use ndarray::{s, Array2, Array3, ArrayBase, ViewRepr};
 use sci_rs::signal::filter::{design::*, sosfiltfilt_dyn};
 use sci_rs::na::RealField;
@@ -57,7 +59,7 @@ pub fn get_one_channel(ch_idx: usize, eeg_data: &Array2<i16>) -> Result<Vec<i16>
 }
 
 
-// Replace interval around of the TMS pulse with 0 
+// Replace interval around of the TMS pulse with 0
 pub fn remove_tms_pulse(
     tmin_cut: f64,
     tmax_cut: f64,
@@ -81,11 +83,11 @@ pub fn remove_tms_pulse(
         let start_cut = marker_idx.saturating_sub(min_samples);
         let end_cut = (marker_idx + max_samples).min(n_samples);
         if start_cut >= end_cut {
-            continue; 
+            continue;
         }
         for ch_idx in 0..data_copy.nrows() {
             let mut slice = data_copy.slice_mut(s![ch_idx, start_cut..end_cut]);
-            
+
             slice.fill(0);
         }
     }
@@ -118,26 +120,26 @@ pub fn rm_interp_tms_pulse(
         let start_cut = marker_idx.saturating_sub(min_samples);
         let end_cut = (marker_idx + max_samples).min(n_samples);
         if start_cut >= end_cut {
-            continue; 
+            continue;
         }
         for ch_idx in 0..data_copy.nrows() {
                     if start_cut == 0 || end_cut >= n_samples {
                         data_copy.slice_mut(s![ch_idx, start_cut..end_cut]).fill(0);
-                        continue; 
+                        continue;
                     }
                     let p1_x = (start_cut - 1) as f64;
                     let p1_y = data_copy[[ch_idx, start_cut - 1]] as f64;
                     let p2_x = end_cut as f64;
                     let p2_y = data_copy[[ch_idx, end_cut]] as f64;
-                    
+
                     let source_points = vec![(p1_x, p1_y), (p2_x, p2_y)];
                     let gap_len = end_cut - start_cut;
-                    if gap_len == 0 { continue; } 
+                    if gap_len == 0 { continue; }
                     let opts = SplineOpts::new().num_of_segments(gap_len as u32);
-        
+
                     let points = <cubic_spline::Points as cubic_spline::TryFrom<_>>::try_from(&source_points)?;
                     let calculated_points = points.calc_spline(&opts)?;
-        
+
                     for i in 0..gap_len {
                         let new_y = calculated_points.get_ref()[i + 1].y;
                         data_copy[[ch_idx, start_cut + i]] = new_y.round() as i16;
@@ -189,7 +191,6 @@ where
 }
 
 
-
 pub fn hp_filter(
     lfreq: f64,
     eeg_info: &EEGInfo,
@@ -198,22 +199,27 @@ pub fn hp_filter(
     if eeg_data.is_empty() {
         return Ok(Array2::from_shape_vec((0, 0), Vec::new()).unwrap());
     }
-    
-    let mut data_vec_vec: Vec<Vec<i16>> = Vec::new();
+
     let sos = design_butter_hp(2, lfreq, eeg_info.sfreq as f64);
-    
-    //print!("Highpass filtering individual channels...");
-    for channel in eeg_data.rows(){
-        let filtered: Vec<f64> = sosfiltfilt_dyn(channel.into_iter().map(|sample| *sample as f64), &sos);
-        let filtered_vec: Vec<i16> = filtered.into_iter().map(|sample| sample.round() as i16).collect(); 
-        data_vec_vec.push(filtered_vec); 
-    }
-    
+    let n_channels = eeg_data.nrows();
+
+    let data_vec_vec: Vec<Vec<i16>> = (0..n_channels)
+        .into_par_iter()
+        .map(|ch_idx| {
+            let channel = eeg_data.row(ch_idx);
+            let filtered: Vec<f64> = sosfiltfilt_dyn(
+                channel.into_iter().map(|sample| *sample as f64),
+                &sos
+            );
+            filtered.into_iter()
+                .map(|sample| sample.round() as i16)
+                .collect()
+        })
+        .collect();
+
     let data = vec_to_ndarray(data_vec_vec);
     Ok(data)
-    }
-
-
+}
 
 pub fn lp_filter(
     hfreq: f64,
@@ -223,81 +229,197 @@ pub fn lp_filter(
     if eeg_data.is_empty() {
         return Ok(Array2::from_shape_vec((0, 0), Vec::new()).unwrap());
     }
-    
-    let mut data_vec_vec: Vec<Vec<i16>> = Vec::new();
+
     let sos = design_butter_lp(2, hfreq, eeg_info.sfreq as f64);
-    
-    //print!("Lowpass filtering individual channels...");
-    for channel in eeg_data.rows(){
-        let filtered: Vec<f64> = sosfiltfilt_dyn(channel.into_iter().map(|sample| *sample as f64), &sos);
-        let filtered_vec: Vec<i16> = filtered.into_iter().map(|sample| sample.round() as i16).collect(); 
-        data_vec_vec.push(filtered_vec); 
-    }
-    
+    let n_channels = eeg_data.nrows();
+
+    let data_vec_vec: Vec<Vec<i16>> = (0..n_channels)
+        .into_par_iter()
+        .map(|ch_idx| {
+            let channel = eeg_data.row(ch_idx);
+            let filtered: Vec<f64> = sosfiltfilt_dyn(
+                channel.into_iter().map(|sample| *sample as f64),
+                &sos
+            );
+            filtered.into_iter()
+                .map(|sample| sample.round() as i16)
+                .collect()
+        })
+        .collect();
+
     let data = vec_to_ndarray(data_vec_vec);
     Ok(data)
+}
+
+
+
+fn resample_channel_opt(
+    x: &[i16],
+    target_length: usize,
+    fft: &Arc<dyn rustfft::Fft<f64>>,
+    ifft: &Arc<dyn rustfft::Fft<f64>>,
+    scratch: &mut [nalgebra::Complex<f64>]
+) -> Vec<f64> {
+    use nalgebra::Complex;
+
+    let input_length = x.len();
+
+    // Convert to complex and apply window to reduce artifacts
+    let mut x_complex: Vec<Complex<f64>> = x
+        .iter()
+        .enumerate()
+        .map(|(i, &sample)| {
+
+            let window = 0.5 * (1.0 - ((2.0 * std::f64::consts::PI * i as f64) / (input_length - 1) as f64).cos());
+            Complex::new(sample as f64 * window, 0.0)
+            //Complex::new(sample as f64, 0.0)
+        })
+        .collect();
+
+    fft.process_with_scratch(&mut x_complex, scratch);
+
+
+    let mut y_spectrum = vec![Complex::zero(); target_length];
+
+    // Determine how many frequency bins to copy
+    let bins_to_copy = std::cmp::min(input_length, target_length);
+    let half_bins = bins_to_copy / 2;
+
+    // Copy DC and positive frequencies
+    y_spectrum[..=half_bins].copy_from_slice(&x_complex[..=half_bins]);
+
+    if bins_to_copy > 1 {
+        let neg_start_src = input_length - half_bins;
+        let neg_start_dst = target_length - half_bins;
+        y_spectrum[neg_start_dst..].copy_from_slice(&x_complex[neg_start_src..]);
     }
 
+    // Handle Nyquist frequency for even lengths
+    if input_length % 2 == 0 && target_length % 2 == 0 && input_length != target_length {
+        let nyquist_src = input_length / 2;
+        let nyquist_dst = target_length / 2;
 
-pub fn resample<F: Float + FftNum>(x: &[F], n: usize) -> Vec<F> {
-    // SciPy style 'Fourier' resampling
-    // 1. Compute FFT of x
-    // 2. Fill vec of zeros with the desired length, y.
-    // 3. Set the from beginning of y to the first half of x
-    // 4. Set the from end of y to the second half of x
-    // 5. Compute IFFT of y
-    // 6. Multiply y by (n / x.len())
-    // 7. Take the real part of y
-    // Compute FFT of x
-    let mut fft_planner = rustfft::FftPlanner::<F>::new();
-    let fft = fft_planner.plan_fft_forward(x.len());
-    let ifft = fft_planner.plan_fft_inverse(n);
+        if target_length > input_length {
+            y_spectrum[nyquist_dst] = x_complex[nyquist_src] * 0.5;
+            y_spectrum[target_length - nyquist_dst] = x_complex[nyquist_src] * 0.5;
+        } else if nyquist_dst < nyquist_src {
+            // Downsampling: keep Nyquist
+            y_spectrum[nyquist_dst] = x_complex[nyquist_dst];
+        }
+    }
 
-    let scratch_length = std::cmp::max(
-        fft.get_inplace_scratch_len(),
-        ifft.get_inplace_scratch_len(),
-    );
-    let mut scratch = vec![Complex::zero(); scratch_length];
-    let mut x = x
-        .into_iter()
-        .map(|x| Complex::new(*x, F::zero()))
-        .collect::<Vec<_>>();
-    fft.process_with_scratch(&mut x, &mut scratch);
-    // Fill y with halfs of x
-    let mut y = vec![Complex::zero(); n];
-    let bins = std::cmp::min(x.len(), n);
-    let half_spectrum = bins / 2;
-    y[..half_spectrum].copy_from_slice(&x[..half_spectrum]);
-    y[n - half_spectrum..].copy_from_slice(&x[x.len() - half_spectrum..]);
-    // Compute iFFT of y
-    ifft.process_with_scratch(&mut y, &mut scratch);
-    // Take the scaled real domain as the resampled result
-    let scale_factor = F::from(1.0 / x.len() as f64).unwrap();
-    let y = y.iter().map(|x| x.re * scale_factor).collect::<Vec<_>>();
-    y
+    ifft.process_with_scratch(&mut y_spectrum, scratch);
+
+    let scale_factor = target_length as f64 / input_length as f64;
+    y_spectrum.iter()
+        .map(|complex| complex.re * scale_factor)
+        .collect()
 }
 
 pub fn resample_eeg(
-    n_sfreq: usize,
+    target_sfreq: usize,
     eeg_info: &EEGInfo,
     eeg_data: &Array2<i16>,
 ) -> Result<Array2<i16>, Box<dyn std::error::Error>> {
     if eeg_data.is_empty() {
         return Ok(Array2::from_shape_vec((0, 0), Vec::new()).unwrap());
     }
-    
-    let mut data_vec_vec: Vec<Vec<i16>> = Vec::new();
-    
-    //print!("Highpass filtering individual channels...");
-    for channel in eeg_data.rows(){
-        let channel_f64: Vec<f64> = channel.iter().map(|&i|i as f64).collect();
-        let resampled_vec = resample(&channel_f64, n_sfreq); 
-        let channel_i16: Vec<i16> = resampled_vec.iter().map(|&i| i as i16).collect();
-        data_vec_vec.push(channel_i16); 
-    }
-    
+
+    let n_channels = eeg_data.nrows();
+    let original_length = eeg_data.ncols();
+    let original_sfreq = eeg_info.sfreq as f64;
+
+    let duration_seconds = original_length as f64 / original_sfreq;
+    let target_length = (duration_seconds * target_sfreq as f64).round() as usize;
+
+    println!("Resampling {} channels from {} Hz ({} samples) to {} Hz ({} samples)...",
+             n_channels, original_sfreq, original_length, target_sfreq, target_length);
+    println!("Duration: {:.2} seconds", duration_seconds);
+
+    let fft_planner = Arc::new(std::sync::Mutex::new(rustfft::FftPlanner::<f64>::new()));
+    let fft = {
+        let mut planner = fft_planner.lock().unwrap();
+        planner.plan_fft_forward(original_length)
+    };
+    let ifft = {
+        let mut planner = fft_planner.lock().unwrap();
+        planner.plan_fft_inverse(target_length)
+    };
+
+    let scratch_length = std::cmp::max(
+        fft.get_inplace_scratch_len(),
+        ifft.get_inplace_scratch_len(),
+    );
+
+    let data_vec_vec: Vec<Vec<i16>> = (0..n_channels)
+        .into_par_iter()
+        .map(|ch_idx| {
+            let mut scratch = vec![nalgebra::Complex::zero(); scratch_length];
+
+            let channel = eeg_data.row(ch_idx);
+            let resampled_vec = resample_channel_opt(
+                channel.as_slice().unwrap(),
+                target_length,
+                &fft,
+                &ifft,
+                &mut scratch
+            );
+
+            resampled_vec.iter().map(|&i| i as i16).collect()
+        })
+        .collect();
+
+    println!("Resampling completed! New shape should be [{}, {}]", n_channels, target_length);
     let data = vec_to_ndarray(data_vec_vec);
     Ok(data)
+}
+
+pub fn resample_eeg_linear(
+    target_sfreq: usize,
+    eeg_info: &EEGInfo,
+    eeg_data: &Array2<i16>,
+) -> Result<Array2<i16>, Box<dyn std::error::Error>> {
+    if eeg_data.is_empty() {
+        return Ok(Array2::from_shape_vec((0, 0), Vec::new()).unwrap());
     }
-    
-    
+
+    let n_channels = eeg_data.nrows();
+    let original_length = eeg_data.ncols();
+    let original_sfreq = eeg_info.sfreq as f64;
+
+    // Calculate the correct number of output samples
+    let duration_seconds = original_length as f64 / original_sfreq;
+    let target_length = (duration_seconds * target_sfreq as f64).round() as usize;
+
+    println!("Linear resampling {} channels from {} Hz ({} samples) to {} Hz ({} samples)...",
+             n_channels, original_sfreq, original_length, target_sfreq, target_length);
+
+    let data_vec_vec: Vec<Vec<i16>> = (0..n_channels)
+        .into_par_iter()
+        .map(|ch_idx| {
+            let channel = eeg_data.row(ch_idx);
+            let channel_slice = channel.as_slice().unwrap();
+
+            // Linear interpolation resampling
+            (0..target_length)  // Use target_length, not target_sfreq
+                .map(|i| {
+                    let original_index = (i as f64 * original_length as f64) / target_length as f64;
+                    let idx_floor = original_index.floor() as usize;
+                    let idx_ceil = (idx_floor + 1).min(original_length - 1);
+                    let fraction = original_index - idx_floor as f64;
+
+                    if idx_floor == idx_ceil {
+                        channel_slice[idx_floor]
+                    } else {
+                        let val_floor = channel_slice[idx_floor] as f64;
+                        let val_ceil = channel_slice[idx_ceil] as f64;
+                        (val_floor + fraction * (val_ceil - val_floor)) as i16
+                    }
+                })
+                .collect()
+        })
+        .collect();
+
+    let data = vec_to_ndarray(data_vec_vec);
+    Ok(data)
+}

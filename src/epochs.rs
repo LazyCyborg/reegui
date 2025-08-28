@@ -53,9 +53,7 @@ pub fn evoked_eeg(
     }
     let default_evoked = Array2::from_shape_vec((0, 0), Vec::new()).unwrap();
     let epochs_f64 = epochs.epochs.mapv(|i| i as f64);
-    
     let evoked = epochs_f64.mean_axis(Axis(0)).unwrap_or(default_evoked);
     Ok(evoked)   
-
 }
     

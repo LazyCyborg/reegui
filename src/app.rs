@@ -24,6 +24,7 @@ pub struct TemplateApp {
     y_view_min: f64,
     y_view_max: f64,
     plot_zoom_factor: Vec2,
+    gain: f64,
     view_all: bool,
     show_data: bool,
     decimation_factor: usize,
@@ -47,11 +48,12 @@ impl TemplateApp {
             y_view_min: 0.0,
             y_view_max: 600.0,
             x_view: 0.0,
+            gain: 1.0,
             plot_zoom_factor: Vec2::new(1.0, 1.0),
             unselected_channels: Vec::new(),
             view_all: false,
             show_data: false,
-            decimation_factor: 10,
+            decimation_factor: 100,
             tmin_cut: 0.005,
             tmax_cut: 0.005,
             lfreq: 1.0,
@@ -68,12 +70,56 @@ impl TemplateApp {
     }
 }
 
+impl TemplateApp {
+    fn get_adaptive_decimation(&self) -> usize {
+        let zoom_x = self.plot_zoom_factor[0];
+
+        if zoom_x > 4.0 {
+            1  // No decimation when heavily zoomed in
+        } else if zoom_x > 2.0 {
+            2  // Light decimation
+        } else if zoom_x > 1.0 {
+            5  // Medium decimation
+        } else {
+            self.decimation_factor
+        }
+    }
+}
+
+
+impl TemplateApp {
+   fn min_max_decimate(&self, data: &[i16], start_sample: usize, decimation: usize, offset: f64) -> Vec<[f64; 2]>{
+        if decimation <= 1 {
+            return data.into_iter().enumerate().map(|(i, &sample)| {
+                let x = (start_sample + i) as f64 / self.info.sfreq as f64;
+                let y = (sample as f64 / 100.0) * self.gain + offset;
+
+                [x, y]
+            }).collect();
+        }
+        let mut points = Vec::new();
+        for chunk in data.chunks(decimation) {
+            let chunk_start = (points.len() / 2) * decimation;
+            let time_base = (start_sample + chunk_start) as f64 / self.info.sfreq as f64;
+
+            if let (Some(&min_val), Some(&max_val)) = (chunk.iter().min(), chunk.iter().max()) {
+                points.push([time_base, (min_val as f64 / 100.0) + offset]);
+                points.push([time_base + (decimation as f64 * 0.5) / self.info.sfreq as f64,
+                            (max_val as f64 / 100.0) * self.gain + offset]);
+
+            }
+        }
+
+        points
+    }
+}
+
 impl eframe::App for TemplateApp {
     /// Called by the framework to save state before shutdown.
     //fn save(&mut self, storage: &mut dyn eframe::Storage) {
       //  eframe::set_value(storage, eframe::APP_KEY, self);
     //}
-    
+
 
     /// Called each time the UI needs repainting, which may be many times per second.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -118,11 +164,12 @@ impl eframe::App for TemplateApp {
             self.x_view -= 10.0
         }
         if ctx.input(|i|i.key_pressed(Key::ArrowUp)){
-            self.plot_zoom_factor[1] += 1.0
+            self.gain *= 1.1;
         }
         if ctx.input(|i|i.key_pressed(Key::ArrowDown)){
-            self.plot_zoom_factor[1] -= 1.0
+            self.gain /= 1.1;
         }
+
 
         egui::CentralPanel::default().show(ctx, |ui| {
             // The central panel the region left after adding TopPanel's and SidePanel's
@@ -145,7 +192,7 @@ impl eframe::App for TemplateApp {
 
 
             ui.checkbox(&mut self.view_all, "Show all channels");
-            
+
             if ui.button("Show EEG data").clicked(){
                 self.show_data = true
             }
@@ -153,53 +200,63 @@ impl eframe::App for TemplateApp {
             if self.view_all == true {
                 self.unselected_channels.clear();
             }
+
             if self.show_data {
-                let channel_offset = 10.0;             
-                let mut offset = 0.0; 
-    
+                let channel_offset = 10.0;
+                let mut offset = 0.0;
+
                 let plt = Plot::new("my_plot")
                     .show_x(true)
                     .show_y(false)
                     .show(ui, |plot_ui| {
+
+                    let start_time = self.x_view;
+                    let end_time = self.x_view + 10.0;
+                    let start_sample = ((start_time * self.info.sfreq as f64) as usize).max(0);
+                    let end_sample = (end_time * self.info.sfreq as f64) as usize;
+                    let visible_channels = self.data.data.nrows() - self.unselected_channels.len();
+                    let total_height = visible_channels as f64 * channel_offset;
+                    plot_ui.set_plot_bounds_y(-channel_offset..=(total_height + channel_offset));
+
                     for ch in 0..self.data.data.nrows(){
-                    if !self.unselected_channels.contains(&ch){
-                        let one_channel = self.data.data.row(ch);
-                        let points: PlotPoints = one_channel.into_iter().enumerate().step_by(self.decimation_factor).map(|(i, &sample)| {
-    
-                            let x = i as f64 / self.info.sfreq as f64;
-                            let y = (sample as f64 / 100.0) + offset;
-                            [x, y]
-                        }).collect();
-                        let text_x = self.x_view + 0.1;
-                        let text_y = offset;
-                        let text_point = PlotPoint::new(text_x, text_y);
-                        let line = Line::new("EEG", points);
-                        plot_ui.line(line);
-                        let text = Text::new(self.info.ch_names[ch].clone(), text_point, self.info.ch_names[ch].clone());
-    
-                        plot_ui.text(text);
-    
-                        offset += channel_offset;
-                                }
-    
+                        if !self.unselected_channels.contains(&ch){
+                            let one_channel = self.data.data.row(ch);
+                            let channel_slice = one_channel.as_slice().unwrap();
+
+                            if start_sample < channel_slice.len() {
+                                let actual_end = end_sample.min(channel_slice.len());
+                                let visible_data = &channel_slice[start_sample..actual_end];
+                                let adaptive_decimation = self.get_adaptive_decimation();
+                                let points = self.min_max_decimate(visible_data, start_sample, adaptive_decimation, offset);
+                                let line = Line::new("EEG", points);
+                                plot_ui.line(line);
+                                let text_x = self.x_view + 0.1;
+                                let text_y = offset;
+                                let text_point = PlotPoint::new(text_x, text_y);
+                                let text = Text::new(self.info.ch_names[ch].clone(), text_point, self.info.ch_names[ch].clone());
+                                plot_ui.text(text);
+
+                                offset += channel_offset;
+                            }
+                        }
                     }
+
+
                     let center_x = self.x_view + 5.0;
                     let center_y = self.y_view_min + 10.0 + (self.y_view_max - self.y_view_min) / 2.0;
                     let center_point = PlotPoint::new(center_x, center_y);
-    
-                        plot_ui.set_plot_bounds_x(self.x_view..=(self.x_view + 10.0));
-                        plot_ui.set_plot_bounds_y((self.y_view_min+10.0)..=(self.y_view_max + 10.0));
-    
-                        plot_ui.zoom_bounds(self.plot_zoom_factor, center_point);
-    
+
+                    plot_ui.set_plot_bounds_x(self.x_view..=(self.x_view + 10.0));
+                    plot_ui.zoom_bounds(Vec2::new(self.plot_zoom_factor[0], 1.0), center_point);
+
                     let marker_points = &self.markers.markers;
                     for x in 0..marker_points.len(){
                             let marker_pos = self.markers.markers[x] / self.info.sfreq as f64;
                             plot_ui.vline(VLine::new("TMS", marker_pos));
                         }
-    
+
                     });
-                
+
             };
 
             egui::widgets::global_theme_preference_buttons(ui);
@@ -215,7 +272,7 @@ impl eframe::App for TemplateApp {
                 egui::warn_if_debug_build(ui);
             });
         });
-        
+
         egui::SidePanel::right("controls_panel").show(ctx, |ui| {
                 ui.heading("Controls");
                             egui::ComboBox::from_label("Y scale")
@@ -229,7 +286,7 @@ impl eframe::App for TemplateApp {
                     ui.selectable_value(&mut self.y_view_max, 700.0, "700");
                 }
             );
-            
+
             egui::ComboBox::from_label("Decmation factor")
                 .selected_text(format!("{:?}", self.decimation_factor))
                 .show_ui(ui, |ui| {
@@ -241,15 +298,15 @@ impl eframe::App for TemplateApp {
 
                 }
             );
-            
+
             if ui.button("Remove TMS pulse").clicked(){
                 self.data.data = signal::remove_tms_pulse(self.tmin_cut, self.tmax_cut, &self.markers, &self.info, &self.data.data).expect("Removal failed")
             }
-            
+
             if ui.button("Remove and interpolate TMS pulse").clicked(){
                 self.data.data = signal::rm_interp_tms_pulse(self.tmin_cut, self.tmax_cut, &self.markers, &self.info, &self.data.data).expect("Removal failed")
             }
-            
+
             ui.heading("Filter settings");
             egui::ComboBox::from_label("Highpass filter lfreq")
                 .selected_text(format!("{:?}", self.lfreq))
@@ -262,7 +319,7 @@ impl eframe::App for TemplateApp {
                     ui.selectable_value(&mut self.lfreq, 2.0, "2.0");
                 }
             );
-                
+
             egui::ComboBox::from_label("Lowpass filter hfreq")
                 .selected_text(format!("{:?}", self.hfreq))
                 .show_ui(ui, |ui| {
@@ -274,12 +331,12 @@ impl eframe::App for TemplateApp {
                     ui.selectable_value(&mut self.hfreq, 100.0, "100");
                 }
             );
-                
+
             if ui.button("Filter data").clicked(){
                 self.data.data = signal::hp_filter(self.lfreq, &self.info, &self.data.data).expect("Highpass filtering failed");
                 self.data.data = signal::lp_filter(self.hfreq, &self.info, &self.data.data).expect("Lowpass filtering failed");
             }
-            
+
             ui.heading("Resample data");
             ui.collapsing("Warning!", |ui| { ui.label("Do not resample before removing TMS artefact and filtering data!"); });
             egui::ComboBox::from_label("New sfreq")
@@ -293,7 +350,7 @@ impl eframe::App for TemplateApp {
                     ui.selectable_value(&mut self.n_sfreq, 2000, "2000 Hz");
                 }
             );
-            
+
             if ui.button("Apply resampling").clicked(){
                 self.data.data = signal::resample_eeg(self.n_sfreq, &self.info, &self.data.data).expect("Resampling failed");
                 self.info.sfreq = self.n_sfreq as i32;
